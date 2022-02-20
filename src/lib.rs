@@ -1,6 +1,6 @@
 use once_cell::unsync::OnceCell;
-use std::fmt;
-use std::ops::Index;
+use std::cmp::Ordering;
+use std::ops::{Index, IndexMut};
 use std::result::Result;
 
 /// SteadyVec<T> is a variant of std::Vec<T> which does
@@ -11,13 +11,35 @@ use std::result::Result;
 /// equivalent to a standard resizing vector using size doubling. However,
 /// indexing requires two pointer dereferences rather than one, and
 /// growing the vector only requires allocation, not copying.
-#[derive(Debug)]
+///
+/// One important difference in the API between this type and Vec<T>
+/// is that this type allows non-contoiguous ranges of set values. For example,
+/// while it is illegal to have a Vec<T> have a value at index 0 and at index 2
+/// with no value at index 1, that state is legal for this vector. That means
+/// that SteadyVec::iter does not return a FusedIterator, and that this
+/// type has no inherent notion of length. Doing this gives slightly more
+/// flexibility in the exact order in which values are initialized. For
+/// a type that does not move it's contents but which has these constraints,
+/// see SteadyStack<T>.
+#[derive(Debug, PartialEq, Eq)]
 pub struct SteadyVec<T> {
     // the capacities of the vectors in this array are
     // 1, 1, 2, 2^1, 2^2, ..., 2^63, giving it a total
     // potential capacity of 2^64, and the capacity of
     // vectors before each index 2^(i-1)
     data: [OnceCell<Vec<OnceCell<T>>>; 65],
+}
+
+impl<T: PartialOrd> PartialOrd for SteadyVec<T> {
+    fn partial_cmp(&self, other: &SteadyVec<T>) -> Option<Ordering> {
+        unimplemented!()
+    }
+}
+
+impl<T: Ord> Ord for SteadyVec<T> {
+    fn cmp(&self, other: &SteadyVec<T>) -> Ordering {
+        unimplemented!()
+    }
 }
 
 fn items_before_outer_index(index: usize) -> u64 {
@@ -54,6 +76,9 @@ impl<T> SteadyVec<T> {
             .and_then(|i| i[inner_index].get())
     }
 
+    /// try_set returns Ok(()) if the index didn't have a value, and Err(&x) if
+    /// the index already had a value, with &x being a reference to the value
+    /// in that index.
     pub fn try_set(&self, index: u64, item: T) -> Result<(), &T> {
         let outer_index = (u64::BITS - index.leading_zeros()) as usize;
         let inner_index = (index - items_before_outer_index(outer_index)) as usize;
@@ -68,11 +93,69 @@ impl<T> SteadyVec<T> {
             .map_err(|t| t.0)
     }
 
+    /// try_init executes f only if the index has no value. The return value is the
+    /// same as try_set.
+    pub fn try_init(&self, index: u64, f: impl FnOnce() -> T) -> Result<(), &T> {
+        unimplemented!()
+    }
+
+    /// get_or_set returns a reference to the value at the index, setting it
+    /// to the provided value if needed.
+    pub fn get_or_set(&self, index: u64, item: T) -> &T {
+        unimplemented!()
+    }
+
+    /// get_or_init returns a reference to the value at the index, calling f
+    /// and setting the value with f's return value if needed.
+    pub fn get_or_init(&self, index: u64, f: impl FnOnce() -> T) -> &T {
+        unimplemented!()
+    }
+
+    pub fn get_mut(&mut self, index: u64) -> Option<&mut T> {
+        unimplemented!()
+    }
+
+    pub fn delete(&mut self, index: u64) -> Option<T> {
+        unimplemented!()
+    }
+
+    pub fn set(&mut self, index: u64, item: T) -> Option<&T> {
+        unimplemented!()
+    }
+
     pub fn iter<'a>(&'a self) -> SteadyVecIterator<'a, T> {
         return SteadyVecIterator {
             underlying: self,
             index: 0,
         };
+    }
+
+    pub fn iter_mut<'a>(&'a mut self) -> SteadyVecMutIterator<'a, T> {
+        unimplemented!()
+    }
+
+    pub fn into_iter(self) -> SteadyVecOwnedIterator<T> {
+        unimplemented!()
+    }
+}
+
+impl<T> FromIterator<T> for SteadyVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        unimplemented!()
+    }
+}
+
+impl<T> Index<u64> for SteadyVec<T> {
+    type Output = T;
+
+    fn index(&self, index: u64) -> &Self::Output {
+        self.get(index).unwrap()
+    }
+}
+
+impl<T> IndexMut<u64> for SteadyVec<T> {
+    fn index_mut(&mut self, index: u64) -> &mut Self::Output {
+        self.get_mut(index).unwrap()
     }
 }
 
@@ -89,6 +172,16 @@ impl<'a, T> Iterator for SteadyVecIterator<'a, T> {
         self.index += 1;
         return it;
     }
+}
+
+pub struct SteadyVecMutIterator<'a, T> {
+    underlying: &'a mut SteadyVec<T>,
+    index: u64,
+}
+
+pub struct SteadyVecOwnedIterator<T> {
+    underlying: SteadyVec<T>,
+    index: u64,
 }
 
 #[cfg(test)]
