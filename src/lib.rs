@@ -1,7 +1,10 @@
-use once_cell::unsync::OnceCell;
 use std::cmp::Ordering;
 use std::ops::{Index, IndexMut};
 use std::result::Result;
+
+// TODO: Duplicate all this code, or maybe use a macro,
+// to also create a sync implementation
+use once_cell::unsync::OnceCell;
 
 /// SteadyVec<T> is a variant of std::Vec<T> which does
 /// not ever move it's contents, meaning that it's safe to hold
