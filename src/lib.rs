@@ -1,4 +1,8 @@
+#![feature(cell_update)]
+
+use std::cell::{Cell, UnsafeCell};
 use std::cmp::Ordering;
+use std::mem::MaybeUninit;
 use std::ops::{Index, IndexMut};
 use std::result::Result;
 
@@ -306,12 +310,126 @@ impl<T> Iterator for SteadyVecOwnedIterator<T> {
     }
 }
 
+// Lol, is this just a pointer? Should I just be using pointers?
+struct SuperUnsafeCell<T> {
+    it: UnsafeCell<MaybeUninit<T>>,
+}
+
+impl<T> SuperUnsafeCell<T> {
+    fn new() -> Self {
+        SuperUnsafeCell {
+            it: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    fn from(t: T) -> Self {
+        let mut inner = MaybeUninit::uninit();
+        inner.write(t);
+        SuperUnsafeCell {
+            it: UnsafeCell::new(inner),
+        }
+    }
+
+    unsafe fn assume_init_mut(&self) -> &mut T {
+        self.it.get().as_mut().unwrap().assume_init_mut()
+    }
+
+    unsafe fn get_mut(&self) -> &mut MaybeUninit<T> {
+        self.it.get().as_mut().unwrap()
+    }
+}
+
+pub struct SteadyStack<T> {
+    // the capacities of the vectors in this array are
+    // 1, 1, 2, 2^1, 2^2, ..., 2^63, giving it a total
+    // potential capacity of 2^64, and the capacity of
+    // vectors before each index 2^(i-1)
+    data: [SuperUnsafeCell<Vec<SuperUnsafeCell<T>>>; 65],
+    length: Cell<u64>,
+}
+
+impl<T> SteadyStack<T> {
+    pub const fn new() -> Self {
+        SteadyStack {
+            data: unsafe {
+                // I'm really not sure this is safe...
+                MaybeUninit::uninit().assume_init()
+            },
+            length: Cell::new(0),
+        }
+    }
+
+    pub fn get(&self, index: u64) -> Option<&T> {
+        if index >= self.length.get() {
+            return None;
+        }
+
+        let outer_index = (u64::BITS - index.leading_zeros()) as usize;
+        let inner_index = (index - items_before_outer_index(outer_index)) as usize;
+
+        unsafe {
+            return Some(self.data[outer_index].assume_init_mut()[inner_index].assume_init_mut());
+        }
+    }
+
+    pub fn push(&self, item: T) {
+        if self.length == Cell::new(0) {
+            unsafe {
+                let inner = self.data[0].get_mut().write(vec![SuperUnsafeCell::new()]);
+                inner[0].get_mut().write(item);
+                self.length.update(|x| x + 1);
+                return;
+            }
+        }
+
+        let outer_index = (u64::BITS - self.length.get().leading_zeros()) as usize;
+        let inner_index = (self.length.get() - items_before_outer_index(outer_index)) as usize;
+
+        let prev_outer_index = (u64::BITS - (self.length.get() - 1).leading_zeros()) as usize;
+        if outer_index != prev_outer_index {
+            let size = usize::try_from(items_at_outer_index(outer_index))
+                .expect("index too big for architecture!");
+            let x: Vec<SuperUnsafeCell<T>> = (0..size).map(|_| SuperUnsafeCell::new()).collect();
+            unsafe {
+                self.data[outer_index].get_mut().write(x);
+            }
+        }
+        unsafe {
+            let inner = self.data[outer_index].assume_init_mut();
+            inner[inner_index].get_mut().write(item);
+        }
+        self.length.update(|x| x + 1);
+    }
+
+    pub fn iter<'a>(&'a self) -> SteadyStackIter<'a, T> {
+        SteadyStackIter {
+            underlying: self,
+            index: 0,
+        }
+    }
+}
+
+pub struct SteadyStackIter<'a, T> {
+    underlying: &'a SteadyStack<T>,
+    index: u64,
+}
+
+impl<'a, T> Iterator for SteadyStackIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.underlying.get(self.index);
+        self.index += 1;
+        return item;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn append_while_iterating() {
+    fn fib_steady_vec() {
         let vec: SteadyVec<i32> = SteadyVec::new();
 
         vec.try_set(0, 0).unwrap();
@@ -319,6 +437,26 @@ mod tests {
 
         for (idx, (before, last)) in vec.iter().zip(vec.iter().skip(1)).enumerate().take(20) {
             vec.try_set(idx as u64 + 2, before + last).unwrap();
+        }
+
+        assert_eq!(
+            vec.iter().copied().collect::<Vec<i32>>(),
+            vec![
+                0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181,
+                6765, 10946
+            ]
+        )
+    }
+
+    #[test]
+    fn fib_steady_stack() {
+        let vec: SteadyStack<i32> = SteadyStack::new();
+
+        vec.push(0);
+        vec.push(1);
+
+        for (before, last) in vec.iter().zip(vec.iter().skip(1)).take(20) {
+            vec.push(before + last);
         }
 
         assert_eq!(
