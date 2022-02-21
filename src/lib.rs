@@ -32,13 +32,36 @@ pub struct SteadyVec<T> {
 
 impl<T: PartialOrd> PartialOrd for SteadyVec<T> {
     fn partial_cmp(&self, other: &SteadyVec<T>) -> Option<Ordering> {
-        unimplemented!()
+        for (x, y) in self.data.iter().zip(other.data.iter()) {
+            match (x.get(), y.get()) {
+                (None, None) => {}
+                (Some(_), None) => return Some(Ordering::Greater),
+                (None, Some(_)) => return Some(Ordering::Less),
+                (Some(xs), Some(ys)) => {
+                    for (x, y) in xs.iter().zip(ys.iter()) {
+                        match (x.get(), y.get()) {
+                            (None, None) => {}
+                            (Some(_), None) => return Some(Ordering::Greater),
+                            (None, Some(_)) => return Some(Ordering::Less),
+                            (Some(a), Some(b)) => match a.partial_cmp(b) {
+                                Some(Ordering::Less) => return Some(Ordering::Less),
+                                Some(Ordering::Greater) => return Some(Ordering::Greater),
+                                Some(Ordering::Equal) => {}
+                                None => return None,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+
+        return Some(Ordering::Equal);
     }
 }
 
 impl<T: Ord> Ord for SteadyVec<T> {
     fn cmp(&self, other: &SteadyVec<T>) -> Ordering {
-        unimplemented!()
+        self.partial_cmp(other).unwrap()
     }
 }
 
@@ -96,31 +119,89 @@ impl<T> SteadyVec<T> {
     /// try_init executes f only if the index has no value. The return value is the
     /// same as try_set.
     pub fn try_init(&self, index: u64, f: impl FnOnce() -> T) -> Result<(), &T> {
-        unimplemented!()
+        let outer_index = (u64::BITS - index.leading_zeros()) as usize;
+        let inner_index = (index - items_before_outer_index(outer_index)) as usize;
+
+        let cell = &self.data[outer_index].get_or_init(|| {
+            let size = usize::try_from(items_at_outer_index(outer_index))
+                .expect("index too big for architecture!");
+            (0..size).map(|_| OnceCell::new()).collect()
+        })[inner_index];
+
+        match cell.get() {
+            Some(t) => Err(t),
+            None => {
+                cell.get_or_init(f);
+                Ok(())
+            }
+        }
     }
 
     /// get_or_set returns a reference to the value at the index, setting it
     /// to the provided value if needed.
     pub fn get_or_set(&self, index: u64, item: T) -> &T {
-        unimplemented!()
+        let outer_index = (u64::BITS - index.leading_zeros()) as usize;
+        let inner_index = (index - items_before_outer_index(outer_index)) as usize;
+
+        self.data[outer_index].get_or_init(|| {
+            let size = usize::try_from(items_at_outer_index(outer_index))
+                .expect("index too big for architecture!");
+            (0..size).map(|_| OnceCell::new()).collect()
+        })[inner_index]
+            .get_or_init(|| item)
     }
 
     /// get_or_init returns a reference to the value at the index, calling f
     /// and setting the value with f's return value if needed.
     pub fn get_or_init(&self, index: u64, f: impl FnOnce() -> T) -> &T {
-        unimplemented!()
+        let outer_index = (u64::BITS - index.leading_zeros()) as usize;
+        let inner_index = (index - items_before_outer_index(outer_index)) as usize;
+
+        self.data[outer_index].get_or_init(|| {
+            let size = usize::try_from(items_at_outer_index(outer_index))
+                .expect("index too big for architecture!");
+            (0..size).map(|_| OnceCell::new()).collect()
+        })[inner_index]
+            .get_or_init(f)
     }
 
     pub fn get_mut(&mut self, index: u64) -> Option<&mut T> {
-        unimplemented!()
+        let outer_index = (u64::BITS - index.leading_zeros()) as usize;
+        let inner_index = (index - items_before_outer_index(outer_index)) as usize;
+
+        self.data[outer_index]
+            .get_mut()
+            .and_then(|i| i[inner_index].get_mut())
     }
 
     pub fn delete(&mut self, index: u64) -> Option<T> {
-        unimplemented!()
+        let outer_index = (u64::BITS - index.leading_zeros()) as usize;
+        let inner_index = (index - items_before_outer_index(outer_index)) as usize;
+
+        self.data[outer_index]
+            .get_mut()
+            .and_then(|i| i[inner_index].take())
     }
 
-    pub fn set(&mut self, index: u64, item: T) -> Option<&T> {
-        unimplemented!()
+    /// set returns the previous value at the index.
+    pub fn set(&mut self, index: u64, item: T) -> Option<T> {
+        let outer_index = (u64::BITS - index.leading_zeros()) as usize;
+        let inner_index = (index - items_before_outer_index(outer_index)) as usize;
+
+        self.data[outer_index].get_or_init(|| {
+            let size = usize::try_from(items_at_outer_index(outer_index))
+                .expect("index too big for architecture!");
+            (0..size).map(|_| OnceCell::new()).collect()
+        });
+
+        self.data[outer_index].get_mut().and_then(|i| {
+            let old = i[inner_index].take();
+            i[inner_index]
+                .set(item)
+                .map_err(|_| "this should never happen")
+                .unwrap();
+            return old;
+        })
     }
 
     pub fn iter<'a>(&'a self) -> SteadyVecIterator<'a, T> {
@@ -130,18 +211,32 @@ impl<T> SteadyVec<T> {
         };
     }
 
+    /* TODO: implement this. I'm pretty sure it requries unsafe
     pub fn iter_mut<'a>(&'a mut self) -> SteadyVecMutIterator<'a, T> {
-        unimplemented!()
+        return SteadyVecMutIterator {
+            underlying: self,
+            index: 0,
+        };
     }
+    */
 
     pub fn into_iter(self) -> SteadyVecOwnedIterator<T> {
-        unimplemented!()
+        return SteadyVecOwnedIterator {
+            underlying: self,
+            index: 0,
+        };
     }
 }
 
 impl<T> FromIterator<T> for SteadyVec<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        unimplemented!()
+        let mut res = SteadyVec::new();
+
+        for (i, x) in iter.into_iter().enumerate() {
+            res.set(i as u64, x);
+        }
+
+        return res;
     }
 }
 
@@ -174,14 +269,38 @@ impl<'a, T> Iterator for SteadyVecIterator<'a, T> {
     }
 }
 
+/* TODO: implement this. I'm pretty sure it requries unsafe
 pub struct SteadyVecMutIterator<'a, T> {
     underlying: &'a mut SteadyVec<T>,
     index: u64,
 }
 
+impl<'a, T> Iterator for SteadyVecMutIterator<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<&'a mut T> {
+        // lifetime error on next line. See
+        // https://www.reddit.com/r/rust/comments/bt1ghr/lifetime_differences_between_mutable_and/
+        let it = self.underlying.get_mut(self.index);
+        self.index += 1;
+        return it;
+    }
+}
+*/
+
 pub struct SteadyVecOwnedIterator<T> {
     underlying: SteadyVec<T>,
     index: u64,
+}
+
+impl<T> Iterator for SteadyVecOwnedIterator<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let it = self.underlying.delete(self.index);
+        self.index += 1;
+        return it;
+    }
 }
 
 #[cfg(test)]
